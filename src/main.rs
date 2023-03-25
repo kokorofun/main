@@ -19,7 +19,7 @@ const REVERSE_LOOKUP: [u8; 256] = [
 
 mod coso;
 
-use coso::COSO;
+use coso::*;
 
 use core::cell::RefCell;
 use core::sync::atomic::AtomicBool;
@@ -85,12 +85,14 @@ const SHARPMEM_BIT_CLEAR: u8 = 0x20; // 0x20 in LSB format
 const VRES: usize = 240;
 const HRES: usize = 400;
 
-type LEDPinType = Pin<Gpio19, Output<PushPull>>;
+type VCOMPinType = Pin<Gpio19, Output<PushPull>>;
+type LEDPinType = Pin<Gpio25, Output<PushPull>>;
 
-const VCOM_PERIOD_MS: u32 = 100;
+const VCOM_PERIOD_MS: u32 = 2000000;
 
 static G_ALARM0: Mutex<RefCell<Option<Alarm0>>> = Mutex::new(RefCell::new(None));
-static G_VCOM_PIN: Mutex<RefCell<Option<LEDPinType>>> = Mutex::new(RefCell::new(None));
+static G_VCOM_PIN: Mutex<RefCell<Option<VCOMPinType>>> = Mutex::new(RefCell::new(None));
+static G_LED_PIN: Mutex<RefCell<Option<LEDPinType>>> = Mutex::new(RefCell::new(None));
 static G_IS_VCOM_HIGH: AtomicBool = AtomicBool::new(false);
 static G_TIMER: Mutex<RefCell<Option<hal::Timer>>> = Mutex::new(RefCell::new(None));
 
@@ -133,6 +135,7 @@ fn main() -> ! {
 
     // Set the LED to be an output
     let mut vcom_pin = pins.gpio19.into_push_pull_output();
+    let mut led_pin = pins.led.into_push_pull_output();
 
     // Setup a delay for the LED blink signals:
     let mut delay = cortex_m::delay::Delay::new(core.SYST, clocks.system_clock.freq().to_Hz());
@@ -142,10 +145,10 @@ fn main() -> ! {
     let _spi_mosi = pins.gpio7.into_mode::<gpio::FunctionSpi>();
     let mut spi_cs = pins.gpio5.into_push_pull_output();
     let mut on = pins.gpio20.into_push_pull_output();
-    on.set_high().unwrap();
     // let mut extcomin = pins.gpio19.into_push_pull_output();
 
-    delay.delay_us(100);
+    delay.delay_us(500);
+    on.set_high().unwrap();
 
     // Create an SPI driver instance for the SPI0 device
     let spi = spi::Spi::<_, _, 8>::new(pac.SPI0);
@@ -166,6 +169,7 @@ fn main() -> ! {
 
         G_ALARM0.borrow(cs).replace(Some(alarm0));
         G_VCOM_PIN.borrow(cs).replace(Some(vcom_pin));
+        G_LED_PIN.borrow(cs).replace(Some(led_pin));
         G_TIMER.borrow(cs).replace(Some(timer));
 
         let ref mut g_alarm0 = G_ALARM0.borrow(cs).borrow_mut();
@@ -175,10 +179,14 @@ fn main() -> ! {
         }
 
         let ref mut g_vcom_pin = G_VCOM_PIN.borrow(cs).borrow_mut();
+        let ref mut g_led_pin = G_LED_PIN.borrow(cs).borrow_mut();
         if let Some(led_pin) = g_vcom_pin.as_mut() {
             // set led on for start
-            led_pin.set_low().unwrap();
-            G_IS_VCOM_HIGH.store(false, Ordering::Release);
+            led_pin.set_high().unwrap();
+            if let Some(led_pin) = g_led_pin.as_mut() {
+                led_pin.set_high().unwrap();
+            }
+            G_IS_VCOM_HIGH.store(true, Ordering::Release);
         }
     });
 
@@ -203,12 +211,12 @@ fn main() -> ! {
 
     {
         spi_cs.set_high().unwrap();
-        delay.delay_us(10);
+        delay.delay_us(20);
 
         // spi.write(&[0b00000100 | vcom, 0x00]).unwrap();
         spi.write(&[0b00100000 | vcom, 0x00]).unwrap();
 
-        delay.delay_us(10);
+        delay.delay_us(20);
         spi_cs.set_low().unwrap();
     }
 
@@ -234,31 +242,90 @@ fn main() -> ! {
         spi_cs.set_low().unwrap();
     }
 
+    let start_line = 100;
+    let mut start_col = 20;
+
+    let mut counter = 0;
+    // let mut counter = true;
+    let mut reverse = false;
     loop {
-        {
-            spi_cs.set_high().unwrap();
-            delay.delay_us(50);
+        // let asset = match counter {
+        //     0 => &idle_front,
+        //     1 => &idle_side,
+        //     2 => &walk_side1,
+        //     3 => &walk_side2,
+        //     4 => &walk_side1,
+        //     5 => &walk_side2,
+        //     _ => &walk_side2,
+        // };
+        let asset = match counter {
+            0 => &walk_side1,
+            1 => &walk_side2,
+            _ => &walk_side2,
+        };
+        // let mut asset = &idle_side;
+        // // if counter % 2 == 0 {
+        // if counter {
+        //     asset = &idle_front;
+        // }
 
-            spi.send(0b10000000_u8 | vcom).unwrap();
+        // {
+        spi_cs.set_high().unwrap();
+        delay.delay_us(50);
 
-            for line in 0..240 {
-                let mut data: [u8; 52] = [0x00; 52];
-                for j in 0..50 {
-                    data[j + 1] = COSO[50 * line + j];
+        spi.send(0b10000000_u8 | vcom).unwrap();
+
+        for line in 0..240 {
+            let mut data: [u8; 52] = [0xFF; 52];
+            if line >= start_line && line < start_line + 36 {
+                for j in 0..5 {
+                    let val = !asset[5 * (line - start_line) + j];
+                    match reverse {
+                        false => data[j + 1 + start_col] = val,
+                        true => data[start_col + 5 - j + 1] = REVERSE_LOOKUP[val as usize],
+                    };
                 }
-                data[0] = REVERSE_LOOKUP[line + 1]; // | vcom;
-                                                    // data[0] = 0b00000001 | vcom;
-                                                    // data[1] = 0b11101110_u8;
-                                                    // data[1] = 0b01110111_u8;
-                data[51] = 0x00;
-
-                spi.write(&data).unwrap();
             }
-            spi.send(0x0).unwrap();
+            data[0] = REVERSE_LOOKUP[line + 1]; // | vcom;
+                                                // data[0] = 0b00000001 | vcom;
+                                                // data[1] = 0b11101110_u8;
+                                                // data[1] = 0b01110111_u8;
+            data[51] = 0x00;
 
-            delay.delay_us(50);
-            spi_cs.set_low().unwrap();
+            spi.write(&data).unwrap();
         }
+        delay.delay_us(5);
+
+        spi.send(0x00).unwrap();
+
+        delay.delay_us(50);
+        spi_cs.set_low().unwrap();
+        // }
+
+        // if counter == 0 {
+        //     delay.delay_ms(200);
+        // }
+        delay.delay_ms(100);
+
+        if counter >= 0 {
+            if reverse {
+                start_col = start_col + 1;
+            } else {
+                start_col = start_col - 1;
+            }
+
+            if start_col == 0 || start_col >= 45 {
+                reverse = !reverse;
+            }
+        }
+
+        counter = (counter + 1) % 2;
+        // counter = !counter;
+        // if counter {
+        //     led_pin.set_high().unwrap();
+        // } else {
+        //     led_pin.set_low().unwrap();
+        // }
 
         vcom = !vcom & 0b01000000;
     }
@@ -273,7 +340,8 @@ fn main() -> ! {
 
 #[interrupt]
 fn TIMER_IRQ_0() {
-    static mut VCOM: Option<LEDPinType> = None;
+    static mut VCOM: Option<VCOMPinType> = None;
+    static mut LED: Option<LEDPinType> = None;
 
     if VCOM.is_none() {
         cortex_m::interrupt::free(|cs| {
@@ -281,20 +349,30 @@ fn TIMER_IRQ_0() {
         });
     }
 
-    let mut set_high = false;
+    if LED.is_none() {
+        cortex_m::interrupt::free(|cs| {
+            *LED = G_LED_PIN.borrow(&cs).take();
+        });
+    }
+
+    // let mut set_high = false;
 
     // switch led
     if let Some(vcom) = VCOM {
-        let is_high = G_IS_VCOM_HIGH.load(Ordering::Acquire);
-        // led.set_low().unwrap();
+        if let Some(led) = LED {
+            let is_high = G_IS_VCOM_HIGH.load(Ordering::Acquire);
+            // led.set_low().unwrap();
 
-        if is_high {
-            vcom.set_low().unwrap();
-        } else {
-            set_high = true;
-            vcom.set_high().unwrap();
+            if is_high {
+                vcom.set_low().unwrap();
+                led.set_low().unwrap();
+            } else {
+                // set_high = true;
+                vcom.set_high().unwrap();
+                led.set_high().unwrap();
+            }
+            G_IS_VCOM_HIGH.store(!is_high, Ordering::Release);
         }
-        G_IS_VCOM_HIGH.store(!is_high, Ordering::Release);
     }
 
     cortex_m::interrupt::free(|cs| {
@@ -303,15 +381,15 @@ fn TIMER_IRQ_0() {
             // let ref mut g_timer = G_TIMER.borrow(cs).borrow_mut();
             alarm0.clear_interrupt();
 
-            if false {
-                alarm0.schedule(5000u32.micros()).unwrap();
-                alarm0.enable_interrupt();
-            } else {
-                alarm0.schedule(VCOM_PERIOD_MS.millis()).unwrap();
-                // alarm0.schedule(100u32.micros()).unwrap();
+            // if false {
+            //     alarm0.schedule(500u32.micros()).unwrap();
+            //     alarm0.enable_interrupt();
+            // } else {
+            alarm0.schedule(VCOM_PERIOD_MS.millis()).unwrap();
+            // alarm0.schedule(100u32.micros()).unwrap();
 
-                alarm0.enable_interrupt();
-            }
+            alarm0.enable_interrupt();
+            // }
 
             // if let Some(timer) = g_timer.as_mut() {
             // }
