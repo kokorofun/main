@@ -1,6 +1,14 @@
 #![no_std]
 #![no_main]
 
+// extern crate alloc;
+
+// use cortex_m_rt::entry;
+// use embedded_alloc::Heap;
+
+// #[global_allocator]
+// static HEAP: Heap = Heap::empty();
+
 const REVERSE_LOOKUP: [u8; 256] = [
     0, 128, 64, 192, 32, 160, 96, 224, 16, 144, 80, 208, 48, 176, 112, 240, 8, 136, 72, 200, 40,
     168, 104, 232, 24, 152, 88, 216, 56, 184, 120, 248, 4, 132, 68, 196, 36, 164, 100, 228, 20,
@@ -17,7 +25,10 @@ const REVERSE_LOOKUP: [u8; 256] = [
     239, 31, 159, 95, 223, 63, 191, 127, 255,
 ];
 
+mod assets;
 mod coso;
+mod display;
+mod utils;
 
 use coso::*;
 
@@ -88,7 +99,7 @@ const HRES: usize = 400;
 type VCOMPinType = Pin<Gpio19, Output<PushPull>>;
 type LEDPinType = Pin<Gpio25, Output<PushPull>>;
 
-const VCOM_PERIOD_MS: u32 = 2000000;
+const VCOM_PERIOD_MS: u32 = 67;
 
 static G_ALARM0: Mutex<RefCell<Option<Alarm0>>> = Mutex::new(RefCell::new(None));
 static G_VCOM_PIN: Mutex<RefCell<Option<VCOMPinType>>> = Mutex::new(RefCell::new(None));
@@ -209,125 +220,83 @@ fn main() -> ! {
     // let mut vcom = 0b01000000;
     let mut vcom = 0b00000000;
 
-    {
-        spi_cs.set_high().unwrap();
-        delay.delay_us(20);
+    // {
+    //     spi_cs.set_high().unwrap();
+    //     delay.delay_us(20);
 
-        // spi.write(&[0b00000100 | vcom, 0x00]).unwrap();
-        spi.write(&[0b00100000 | vcom, 0x00]).unwrap();
+    //     // spi.write(&[0b00000100 | vcom, 0x00]).unwrap();
+    //     spi.write(&[0b00100000 | vcom, 0x00]).unwrap();
 
-        delay.delay_us(20);
-        spi_cs.set_low().unwrap();
-    }
+    //     delay.delay_us(20);
+    //     spi_cs.set_low().unwrap();
+    // }
 
-    vcom = !vcom & 0b01000000;
-    // vcom = !vcom & 0b00000010;
+    // vcom = !vcom & 0b01000000;
 
-    // spi_cs.set_low().unwrap();
+    let mut display = display::Display::new(spi, spi_cs, delay);
 
-    {
-        spi_cs.set_high().unwrap();
-        delay.delay_us(50);
+    display.draw_texture(
+        display::Position { x: 0, y: 0 },
+        &assets::textures::Background
+    );
+    display.draw_texture(
+        display::Position { x: 0, y: 0 },
+        &assets::textures::uru::idle_front
+    );
 
-        let mut data: [u8; 54] = [0x00; 54];
-        data[0] = 0b10000000_u8; // | vcom;
-                                 // data[0] = 0b00000001 | vcom;
-                                 // data[1] = 0b11101110_u8;
-        data[1] = 0b01110111_u8;
-        data[52] = 0x00;
-        data[53] = 0x00;
+    // display.draw_texture(
+    //     display::Position { x: 0, y: 0 },
+    //     &assets::texture::furniture::lava_lamp.base,
+    //     assets::texture::furniture::lava_lamp.width as usize,
+    //     assets::texture::furniture::lava_lamp.height as usize,
+    // );
+    // display.update();
 
-        spi.write(&data).unwrap();
-        delay.delay_us(50);
-        spi_cs.set_low().unwrap();
-    }
+    let mut col: usize = 0;
+    let max_x: i32 = 400 - 1 - assets::textures::uru::idle_front_smol.width as i32;
+    let max_y: i32 = 240 - 1 - assets::textures::uru::idle_front_smol.height as i32;
 
-    let start_line = 100;
-    let mut start_col = 20;
+    let v_x = 2;
+    let v_y = 2;
 
-    let mut counter = 0;
-    // let mut counter = true;
-    let mut reverse = false;
+    let mut x: i32 = 0;
+    let mut y: i32 = 0;
+    let mut x_dir: i32 = 1;
+    let mut y_dir = 1;
+
     loop {
-        // let asset = match counter {
-        //     0 => &idle_front,
-        //     1 => &idle_side,
-        //     2 => &walk_side1,
-        //     3 => &walk_side2,
-        //     4 => &walk_side1,
-        //     5 => &walk_side2,
-        //     _ => &walk_side2,
-        // };
-        let asset = match counter {
-            0 => &walk_side1,
-            1 => &walk_side2,
-            _ => &walk_side2,
-        };
-        // let mut asset = &idle_side;
-        // // if counter % 2 == 0 {
-        // if counter {
-        //     asset = &idle_front;
-        // }
+        display.draw_texture(
+            display::Position { x: 0, y: 0 },
+            &assets::textures::Background
+        );
+        display.draw_texture(
+            display::Position { x: x as usize, y: y as usize },
+            &assets::textures::uru::idle_front_smol
+        );
+        display.update();
 
-        // {
-        spi_cs.set_high().unwrap();
-        delay.delay_us(50);
 
-        spi.send(0b10000000_u8 | vcom).unwrap();
+        x += v_x * x_dir;
+        y += v_y * y_dir;
 
-        for line in 0..240 {
-            let mut data: [u8; 52] = [0xFF; 52];
-            if line >= start_line && line < start_line + 36 {
-                for j in 0..5 {
-                    let val = !asset[5 * (line - start_line) + j];
-                    match reverse {
-                        false => data[j + 1 + start_col] = val,
-                        true => data[start_col + 5 - j + 1] = REVERSE_LOOKUP[val as usize],
-                    };
-                }
-            }
-            data[0] = REVERSE_LOOKUP[line + 1]; // | vcom;
-                                                // data[0] = 0b00000001 | vcom;
-                                                // data[1] = 0b11101110_u8;
-                                                // data[1] = 0b01110111_u8;
-            data[51] = 0x00;
-
-            spi.write(&data).unwrap();
-        }
-        delay.delay_us(5);
-
-        spi.send(0x00).unwrap();
-
-        delay.delay_us(50);
-        spi_cs.set_low().unwrap();
-        // }
-
-        // if counter == 0 {
-        //     delay.delay_ms(200);
-        // }
-        delay.delay_ms(100);
-
-        if counter >= 0 {
-            if reverse {
-                start_col = start_col + 1;
+        if x > max_x  || x < 0 {
+            x_dir = -1 * x_dir;
+            if x < 0 {
+                x = 0;
             } else {
-                start_col = start_col - 1;
+                x = max_x;
             }
-
-            if start_col == 0 || start_col >= 45 {
-                reverse = !reverse;
+        }
+        if y > max_y || y < 0 {
+            y_dir = -1 * y_dir;
+            if y < 0 {
+                y = 0;
+            } else {
+                y = max_y;
             }
         }
 
-        counter = (counter + 1) % 2;
-        // counter = !counter;
-        // if counter {
-        //     led_pin.set_high().unwrap();
-        // } else {
-        //     led_pin.set_low().unwrap();
-        // }
-
-        vcom = !vcom & 0b01000000;
+        // delay.delay_ms(1000);
     }
 }
 
